@@ -22,8 +22,9 @@ from apps.members.models import Member, MembershipPlan, MembershipActivity
 from apps.members.services import expire_overdue_members, get_expiry_alerts
 from apps.payments.models import FeeRecord
 from apps.dashboard.models import GymSettings
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 from uuid import UUID
+import calendar
 
 
 def _paid_ids_for_month(month_start: date) -> set:
@@ -142,7 +143,8 @@ class Query:
             member__is_deleted=False,
         )
         paid_members = paid_records.values('member_id').distinct().count()
-        unpaid_members = max(0, active_members - paid_members)
+        paid_ids = _paid_ids_for_month(current_month_start)
+        unpaid_members = Member.objects.filter(status='Active', is_active=True).exclude(id__in=paid_ids).count()
 
         monthly_revenue = paid_records.aggregate(total=Sum('amount'))['total'] or 0.0
         annual_revenue = (
@@ -193,6 +195,81 @@ class Query:
             revenue_trend=revenue_trend,
             member_growth=member_growth,
         )
+
+    @strawberry.field
+    def report_trend(
+        self,
+        period: str = "monthly",
+        year: typing.Optional[int] = None,
+        month: typing.Optional[int] = None,
+    ) -> typing.List[ChartDataPoint]:
+        if not year:
+            year = date.today().year
+
+        current_date = date.today()
+        current_month_start = current_date.replace(day=1)
+
+        def monthly_trend(selected_year: int) -> typing.List[ChartDataPoint]:
+            result: typing.List[ChartDataPoint] = []
+            for m in range(1, 13):
+                month_start = date(selected_year, m, 1)
+                rev = (
+                    FeeRecord.objects.filter(month=month_start, status='Paid')
+                    .aggregate(total=Sum('amount'))['total']
+                    or 0.0
+                )
+                result.append(
+                    ChartDataPoint(
+                        name=month_start.strftime('%b'),
+                        value=float(rev),
+                    )
+                )
+            return result
+
+        def daily_trend(selected_year: int, selected_month: int) -> typing.List[ChartDataPoint]:
+            result: typing.List[ChartDataPoint] = []
+            days_in_month = calendar.monthrange(selected_year, selected_month)[1]
+            for d in range(1, days_in_month + 1):
+                day_date = date(selected_year, selected_month, d)
+                rev = (
+                    FeeRecord.objects.filter(
+                        payment_date=day_date,
+                        status='Paid',
+                    )
+                    .aggregate(total=Sum('amount'))['total']
+                    or 0.0
+                )
+                result.append(
+                    ChartDataPoint(
+                        name=str(d),
+                        value=float(rev),
+                    )
+                )
+            return result
+
+        def yearly_trend(selected_year: int) -> typing.List[ChartDataPoint]:
+            result: typing.List[ChartDataPoint] = []
+            for y in range(selected_year - 4, selected_year + 1):
+                rev = (
+                    FeeRecord.objects.filter(month__year=y, status='Paid')
+                    .aggregate(total=Sum('amount'))['total']
+                    or 0.0
+                )
+                result.append(
+                    ChartDataPoint(
+                        name=str(y),
+                        value=float(rev),
+                    )
+                )
+            return result
+
+        normalized_period = period.lower()
+        if normalized_period == 'daily':
+            selected_month = month or current_date.month
+            return daily_trend(year, selected_month)
+        if normalized_period == 'yearly':
+            return yearly_trend(year)
+        return monthly_trend(year)
 
     @strawberry.field
     def all_plans(

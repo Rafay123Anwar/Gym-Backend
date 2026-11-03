@@ -285,13 +285,17 @@ class Mutation:
         if month_date.replace(day=1) < today_month:
             raise ValueError('Past months are not allowed for fee payment')
 
-        if member.status == 'Expired':
-            if not renew_membership:
+        if member.status == 'Expired' or renew_membership:
+            if member.status == 'Expired' and not renew_membership:
                 raise ValueError(
                     "This membership has expired. Use 'Renew membership' payment to renew."
                 )
             pay_date = date.today()
             plan = member.membership_plan
+            
+            # Determine start reference date for expiry extension
+            start_ref = member.expiry_date if (member.expiry_date and member.expiry_date >= pay_date) else pay_date
+            
             FeeRecord.objects.update_or_create(
                 member=member,
                 month=month_date.replace(day=1),
@@ -301,8 +305,9 @@ class Mutation:
                     'status': 'Paid',
                 },
             )
-            member.join_date = pay_date
-            member.expiry_date = calculate_expiry_date(pay_date, plan)
+            if member.status == 'Expired':
+                member.join_date = pay_date
+            member.expiry_date = calculate_expiry_date(start_ref, plan)
             member.status = 'Active'
             member.is_active = True
             member.save(
@@ -324,7 +329,6 @@ class Mutation:
                 ),
             )
             return True
-
 
         FeeRecord.objects.update_or_create(
             member=member,
